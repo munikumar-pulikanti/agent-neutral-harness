@@ -103,7 +103,11 @@ Two things keep that decision honest:
   a model weight swap, a prompt edit, or a tool-schema change drops stale rows
   from the window instead of dragging the decision for ~50 turns.
   `metrics.detect_within_window_drift(category)` flags a behaviour change that
-  leaves the fingerprint unchanged (e.g. a meaningful tool-description rewrite).
+  leaves the fingerprint unchanged (e.g. a meaningful tool-description rewrite) —
+  it splits the same turn-count window newer/older and reports the jump plus the
+  wall-clock span it covers, so you can tell a real drift from a stale baseline.
+  Flag only, never changes routing; surfaced per category in the dashboard, and
+  `max_age_seconds=` bounds how far back the comparison reaches.
 
 ### Reliability checks standalone
 

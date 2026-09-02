@@ -82,12 +82,27 @@ def test_detect_within_window_drift(metrics_mod):
     drift = metrics_mod.detect_within_window_drift("implement")
     assert drift["drift_detected"] is True
     assert drift["drift_magnitude"] >= 0.3
+    assert "window_span_seconds" in drift
 
 
 def test_detect_within_window_drift_insufficient_data(metrics_mod):
     for _ in range(6):
         _log(metrics_mod, "implement", escalated=True)
-    assert metrics_mod.detect_within_window_drift("implement")["reason"] == "insufficient_data"
+    result = metrics_mod.detect_within_window_drift("implement")
+    assert result["reason"] == "insufficient_data"
+    assert result["window_span_seconds"] == 0
+
+
+def test_detect_within_window_drift_max_age_excludes_stale_rows(metrics_mod):
+    for _ in range(10):
+        _log(metrics_mod, "implement", escalated=False)
+    for _ in range(10):
+        _log(metrics_mod, "implement", escalated=True)
+    # backdate every logged turn well past the age cutoff
+    with metrics_mod._connect() as conn:
+        conn.execute("UPDATE turns SET timestamp = timestamp - 100000")
+    result = metrics_mod.detect_within_window_drift("implement", max_age_seconds=3600)
+    assert result["reason"] == "insufficient_data"
 
 
 def test_breakdowns(metrics_mod):

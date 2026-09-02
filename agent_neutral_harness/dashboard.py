@@ -44,6 +44,32 @@ def _render():
         g3.subheader("Memory tier")
         g3.bar_chart(pd.Series(metrics.memory_tier_breakdown()))
 
+        st.subheader("Routing drift (flag only — never changes routing)")
+        st.caption(
+            "Newer vs older half of each category's escalation-rate window. "
+            "A flagged row means the cheap tier started failing more often "
+            "without a declared config change. Span shows how stale the "
+            "comparison is — the window is turn-count sized, not time-bounded."
+        )
+        drift_rows = []
+        for cat in metrics.category_breakdown():
+            d = metrics.detect_within_window_drift(cat)
+            span_days = d.get("window_span_seconds", 0) / 86400
+            if d["reason"] == "insufficient_data":
+                status = f"— (not enough data: {d['newer_half_size']}+{d['older_half_size']})"
+                newer = older = mag = None
+            else:
+                status = "⚠ drift" if d["drift_detected"] else "stable"
+                newer, older = d["newer_half_rate"], d["older_half_rate"]
+                mag = d["drift_magnitude"]
+            drift_rows.append({
+                "category": cat, "status": status,
+                "newer_half_rate": newer, "older_half_rate": older,
+                "drift_magnitude": mag, "window_span_days": round(span_days, 1),
+            })
+        if drift_rows:
+            st.dataframe(pd.DataFrame(drift_rows), use_container_width=True, hide_index=True)
+
         st.subheader("Assertion flags")
         flagged = df[df["assertion_flags"].fillna("") != ""]
         if flagged.empty:

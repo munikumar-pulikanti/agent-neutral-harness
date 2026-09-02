@@ -14,6 +14,7 @@ The database location resolves in this order:
 import logging
 import os
 import sqlite3
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -161,14 +162,14 @@ def _window(conn, category: str, config_fingerprint):
     """
     if config_fingerprint:
         sql = (
-            "SELECT escalated FROM turns WHERE category = ? "
+            "SELECT escalated, timestamp FROM turns WHERE category = ? "
             "AND cheap_attempt_tokens IS NOT NULL AND config_fingerprint = ? "
             "ORDER BY id DESC LIMIT ?"
         )
         params = (category, config_fingerprint, ESCALATION_RATE_WINDOW)
     else:
         sql = (
-            "SELECT escalated FROM turns WHERE category = ? "
+            "SELECT escalated, timestamp FROM turns WHERE category = ? "
             "AND cheap_attempt_tokens IS NOT NULL "
             "ORDER BY id DESC LIMIT ?"
         )
@@ -196,11 +197,26 @@ def category_escalation_rate(category: str, config_fingerprint: str = "") -> dic
     }
 
 
+def _window_span_seconds(rows) -> int:
+    """Wall-clock span covered by ``rows`` (newest ts - oldest ts).
+
+    The window is sized by turn count, not time, so this is the honest
+    read on how stale the comparison is: a low-volume category can take
+    weeks to fill 50 turns, and the older half is then a weeks-old
+    baseline. Reported so a caller can judge that for itself.
+    """
+    if len(rows) < 2:
+        return 0
+    stamps = [r["timestamp"] for r in rows if r["timestamp"] is not None]
+    return max(stamps) - min(stamps) if len(stamps) >= 2 else 0
+
+
 def detect_within_window_drift(
     category: str,
     config_fingerprint: str = "",
     min_half_size: int = 10,
     drift_threshold: float = 0.3,
+    max_age_seconds: float | None = None,
 ) -> dict:
     """Split the escalation-rate window into newer/older halves and flag a jump.
 
@@ -209,14 +225,26 @@ def detect_within_window_drift(
     behaviour accumulate in the same window, and the newer half shows a
     measurable rise in escalation rate. This is a **flag only** — it
     never changes routing.
+
+    The window is turn-count sized (``ESCALATION_RATE_WINDOW``), which
+    self-normalises for volume — a busy afternoon fills it faster without
+    moving the rate. It does *not* bound how far back the older half
+    reaches, so ``window_span_seconds`` is always reported, and passing
+    ``max_age_seconds`` drops turns older than that before the split
+    (the window can then fall below ``2 * min_half_size`` and report
+    ``insufficient_data``, which is the honest answer).
     """
     with _connect() as conn:
         rows = _window(conn, category, config_fingerprint)
+    if max_age_seconds is not None:
+        cutoff = time.time() - max_age_seconds
+        rows = [r for r in rows if r["timestamp"] is not None and r["timestamp"] >= cutoff]
     total = len(rows)
     half = total // 2
     if half < min_half_size:
         return {"drift_detected": False, "reason": "insufficient_data",
-                "newer_half_size": half, "older_half_size": total - half}
+                "newer_half_size": half, "older_half_size": total - half,
+                "window_span_seconds": _window_span_seconds(rows)}
     newer, older = rows[:half], rows[half:2 * half]
     newer_rate = sum(1 for r in newer if r["escalated"]) / len(newer)
     older_rate = sum(1 for r in older if r["escalated"]) / len(older)
@@ -229,6 +257,7 @@ def detect_within_window_drift(
         "drift_magnitude": drift,
         "newer_half_size": len(newer),
         "older_half_size": len(older),
+        "window_span_seconds": _window_span_seconds(rows[:2 * half]),
     }
 
 
