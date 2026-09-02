@@ -80,7 +80,8 @@ ignore = ["E501"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-m 'not semantic'"
+addopts = "-m 'not semantic and not integration'"
 markers = [
     "semantic: needs the 'memory' extra (ChromaDB + embedding model download); run with -m semantic",
+    "integration: needs a live backend server (MinIO / libSQL) reachable via env vars; run with -m integration",
 ]

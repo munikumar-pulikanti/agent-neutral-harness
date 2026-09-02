@@ -139,28 +139,45 @@ Added:
 - `run_regression_suite`, `metrics.all_eval_results`, configurable state dirs.
 - Public API surface in `agent_neutral_harness/__init__.py`.
 
+## Third pass (2026-09-02) -- the last three gaps
+
+- **Warm-tier multi-writer safety.** Sync is now by **content hash**
+  (`content_sync_key(scope, type, content)` = `sha256(...)[:24]`), not local row
+  id, so two machines that both use local id 1 for different content no longer
+  collide or lose data. `pull()` runs every incoming row through
+  `vault.save_memory()`, so a divergent near-duplicate surfaces as
+  corroboration or `needs_review` -- the review queue is the conflict log.
+  Remote schema is keyed on `sync_key` and records an `origin`.
+- **Cosine-space migration guard.** `MemoryVault._ensure_cosine_space()` detects a
+  Chroma collection created with L2 space, and by default recreates it as cosine
+  and re-embeds from SQLite (the source of truth), logging a warning. Set
+  `AGENT_NEUTRAL_HARNESS_NO_CHROMA_MIGRATE=1` to raise with instructions instead.
+- **Integration tests vs live backends.** `tests/test_integration_backends.py`
+  (`@pytest.mark.integration`) runs the real `ObjectStoreColdTier` against MinIO
+  and the real `TursoWarmTier` push/pull against a libSQL server. CI has an
+  `integration` job with `bitnami/minio` + `libsql-server` service containers.
+  Locally: set `MINIO_ENDPOINT` / `LIBSQL_URL` (see the module docstring). Verified
+  green against real containers on 2026-09-02.
+
+Test lanes now: `pytest` (fast), `-m semantic` (real ChromaDB), `-m integration`
+(real MinIO + libSQL). 65 tests total.
+
 ## Known gaps / open items
 
-1. **Warm/cold tiers aren't exercised against live services in CI.** The sync and
-   archive/restore *logic* is unit-tested (two SQLite DBs for warm; an in-memory
-   fake S3 for cold), but there is no integration test against a real Turso DB or
-   a real MinIO. Manual check before trusting a release.
-2. **Cosine-space assumption.** Similarity scoring assumes the Chroma collection
-   uses cosine distance (`similarity = 1 - distance`). New collections are created
-   with `hnsw:space=cosine`; a collection created by an older version with the
-   default L2 space scores wrong. Migrate: delete `~/.ai-memory-vault/chroma`,
-   run `sync_embeddings`.
-3. **Warm-tier conflict handling is insert-only.** Sync copies rows the other side
-   is missing (by id); it never updates or merges. Ids are assigned locally so
-   two machines can mint the same id for different content. Acceptable for
-   single-writer / small-team use; a real gap for concurrent multi-writer.
-4. **`classify_task` loose-matches** the category name as a token in the model's
+1. **`classify_task` loose-matches** the category name as a token in the model's
    reply. A verbose reply mentioning two category words returns the first in
    `CATEGORIES` order.
-5. **Corroboration re-promotion is one-directional.** A new save promotes the
+2. **Corroboration re-promotion is one-directional.** A new save promotes the
    memory it matches, but a memory promoted to `suspected` earlier is not
    re-checked for `confirmed` if evidence is attached to a *different* corroborator
    later. Revisit only if it bites.
+3. **Warm `push()` doesn't detect a divergent edit at push time** -- only `pull()`
+   does (via `save_memory`). If machine A edits a memory and pushes, and nobody
+   ever pulls on A, A won't see B's conflicting version. Acceptable: pull is the
+   sync direction where review belongs.
+4. **libSQL integration test tolerates an unreachable server** (skips rather than
+   fails) so a flaky image pull doesn't red the build. If the warm tier silently
+   regressed and the server also failed to start, that job would go green.
 
 ## Working conventions
 

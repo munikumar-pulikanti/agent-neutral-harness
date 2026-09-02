@@ -1,8 +1,5 @@
-import pytest
-
 from agent_neutral_harness.memory.vault import (
     CORROBORATION_THRESHOLD,
-    MemoryVault,
     _sanitize_fts_query,
     _url_is_safe,
 )
@@ -55,41 +52,6 @@ def test_search_semantic_falls_back_to_keyword_without_chroma(vault):
 # --------------------------------------------------------------------------- #
 # corroboration / confidence lifecycle -- exercised with a fake vector store
 # --------------------------------------------------------------------------- #
-from difflib import SequenceMatcher  # noqa: E402
-
-
-class FakeCollection:
-    def __init__(self):
-        self.docs: dict[str, str] = {}
-
-    def upsert(self, ids, documents, metadatas=None, embeddings=None):
-        for i, d in zip(ids, documents, strict=False):
-            self.docs[str(i)] = d
-
-    def delete(self, ids):
-        for i in ids:
-            self.docs.pop(str(i), None)
-
-    def query(self, query_texts, n_results=1, include=None):
-        q = query_texts[0]
-        ranked = sorted(
-            self.docs.items(),
-            key=lambda kv: -SequenceMatcher(None, q, kv[1]).ratio(),
-        )[:n_results]
-        ids = [k for k, _ in ranked]
-        dists = [1.0 - SequenceMatcher(None, q, v).ratio() for _, v in ranked]
-        return {"ids": [ids], "distances": [dists], "documents": [[v for _, v in ranked]],
-                "metadatas": [[{} for _ in ranked]]}
-
-
-@pytest.fixture()
-def sem_vault(tmp_path):
-    v = MemoryVault(db_path=str(tmp_path / "v.db"), chroma_path=str(tmp_path / "chroma"))
-    v._chroma_ready = True
-    v._collection = FakeCollection()
-    return v
-
-
 def test_restated_claim_corroborates_not_duplicates(sem_vault):
     sem_vault.save_memory("g", "fact", "The build cache lives under ~/.cache/build")
     msg = sem_vault.save_memory("g", "fact", "The build cache lives under ~/.cache/build")

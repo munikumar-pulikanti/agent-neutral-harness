@@ -48,5 +48,43 @@ jobs:
       - name: Install (core + dev + memory extra)
         run: uv sync --group dev --extra memory
 
-      - name: Semantic integration tests
+      - name: Semantic tests (real ChromaDB)
         run: uv run pytest -q -m semantic
+
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      minio:
+        image: bitnami/minio:latest
+        ports:
+          - 9000:9000
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+        options: >-
+          --health-cmd "mc ready local || curl -f http://localhost:9000/minio/health/live"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      libsql:
+        image: ghcr.io/tursodatabase/libsql-server:latest
+        ports:
+          - 8080:8080
+        env:
+          SQLD_NODE: primary
+    env:
+      MINIO_ENDPOINT: http://localhost:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      LIBSQL_URL: http://localhost:8080
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install (core + dev + memory + warm + cold)
+        run: uv sync --group dev --extra memory --extra warm --extra cold
+
+      - name: Integration tests (real MinIO + libSQL)
+        run: uv run pytest -q -m integration

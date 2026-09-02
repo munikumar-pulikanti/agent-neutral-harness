@@ -215,10 +215,57 @@ class MemoryVault:
             self._collection = client.get_or_create_collection(
                 name="memories", embedding_function=self._embed_fn, metadata={"hnsw:space": "cosine"}
             )
+            self._ensure_cosine_space(client)
         except Exception:  # pragma: no cover - environment dependent
             log.exception("failed to initialise ChromaDB; falling back to keyword search")
             self._collection = None
         return self._collection
+
+    def _ensure_cosine_space(self, client):
+        """Guard against a collection created by an older version with L2 space.
+
+        Similarity scoring here assumes cosine distance (``sim = 1 - dist``);
+        an L2 collection silently mis-scores every corroboration and cascade
+        decision. If a mismatch is found, recreate the collection as cosine
+        and re-embed from SQLite (the source of truth). Set
+        ``AGENT_NEUTRAL_HARNESS_NO_CHROMA_MIGRATE=1`` to raise instead.
+        """
+        space = (getattr(self._collection, "metadata", None) or {}).get("hnsw:space", "cosine")
+        if space == "cosine":
+            return
+        if os.environ.get("AGENT_NEUTRAL_HARNESS_NO_CHROMA_MIGRATE"):
+            raise RuntimeError(
+                f"ChromaDB collection 'memories' uses '{space}' distance, not cosine. "
+                f"Delete {self.chroma_path} and run sync_embeddings(), or unset "
+                f"AGENT_NEUTRAL_HARNESS_NO_CHROMA_MIGRATE to auto-migrate."
+            )
+        log.warning(
+            "migrating ChromaDB collection from '%s' to cosine space (re-embedding from SQLite)",
+            space,
+        )
+        client.delete_collection("memories")
+        self._collection = client.get_or_create_collection(
+            name="memories", embedding_function=self._embed_fn, metadata={"hnsw:space": "cosine"}
+        )
+        self._reembed_all()
+
+    def _reembed_all(self):
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT id, scope, type, content, confidence, evidence_verified FROM memories "
+                "WHERE COALESCE(archived, 0) = 0"
+            ).fetchall()
+        if not rows:
+            return
+        self._collection.upsert(
+            ids=[str(r["id"]) for r in rows],
+            documents=[r["content"] for r in rows],
+            metadatas=[
+                {"scope": r["scope"], "type": r["type"], "confidence": r["confidence"],
+                 "evidence_verified": bool(r["evidence_verified"])}
+                for r in rows
+            ],
+        )
 
     def embed(self, text: str):
         """Embed one string with the same model Chroma uses, or ``None``."""
@@ -485,24 +532,13 @@ class MemoryVault:
         if not self.collection:
             return "ChromaDB not available (install the 'memory' extra)."
         with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT id, scope, type, content, confidence, evidence_verified FROM memories "
-                "WHERE COALESCE(archived, 0) = 0"
-            ).fetchall()
-        if not rows:
+            n = conn.execute(
+                "SELECT COUNT(*) FROM memories WHERE COALESCE(archived, 0) = 0"
+            ).fetchone()[0]
+        if not n:
             return "No active rows to sync."
-        self.collection.upsert(
-            ids=[str(r["id"]) for r in rows],
-            documents=[r["content"] for r in rows],
-            metadatas=[
-                {
-                    "scope": r["scope"], "type": r["type"],
-                    "confidence": r["confidence"], "evidence_verified": bool(r["evidence_verified"]),
-                }
-                for r in rows
-            ],
-        )
-        return f"Synced {len(rows)} active memories into ChromaDB."
+        self._reembed_all()
+        return f"Synced {n} active memories into ChromaDB."
 
     # exposed for the cold tier
     def _rows_for_archive(self, cutoff_epoch: int) -> list[dict]:

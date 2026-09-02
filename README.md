@@ -151,18 +151,21 @@ from agent_neutral_harness.memory.vault import MemoryVault
 from agent_neutral_harness.memory.warm import TursoWarmTier
 from agent_neutral_harness.memory.cold import ObjectStoreColdTier
 
-warm = TursoWarmTier(local_db_path=DB, sync_url=..., auth_token=...)   # [warm]
-cold = ObjectStoreColdTier(bucket="my-cold", endpoint="http://localhost:9000",
-                           access_key="...", secret_key="...")          # [cold]
+vault = MemoryVault()
+vault.warm = TursoWarmTier(vault=vault, sync_url=..., auth_token=...)      # [warm]
+vault.cold = ObjectStoreColdTier(bucket="my-cold", endpoint="http://localhost:9000",
+                                 access_key="...", secret_key="...")       # [cold]
 
-vault = MemoryVault(warm=warm, cold=cold)
-
-warm.push(); warm.pull()                 # sync the shared replica
-cold.archive(vault, days=90)             # push idle rows to the object store
+vault.warm.push(); vault.warm.pull()     # sync the shared replica
+vault.cold.archive(vault, days=90)       # push idle rows to the object store
 ```
 
 `vault.search_semantic()` then cascades hot → warm → cold, restoring anything it
 finds in a colder tier back into hot.
+
+Warm sync identifies rows by **content hash**, not local id, so two machines never
+collide; a divergent edit of "the same" memory comes down through `save_memory`
+and lands as `needs_review` rather than being silently merged.
 
 ### Dashboard
 
