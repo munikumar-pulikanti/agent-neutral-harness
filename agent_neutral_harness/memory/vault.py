@@ -1,20 +1,32 @@
-"""Persistent memory vault with evidence-gated confidence scoring.
+"""Persistent memory vault with evidence-gated confidence scoring and a
+hot -> warm -> cold search cascade.
 
-What is implemented here (the "hot" tier):
+Hot tier (always available):
 - Local SQLite + FTS5 for keyword search.
 - ChromaDB (``all-MiniLM-L6-v2``) for semantic vector search, used when
   the optional ``memory`` extra is installed; the vault degrades to
   keyword-only search when it is not.
-- Evidence-gated confidence: a new memory is ``hypothesis`` until it is
-  corroborated by an existing similar memory, and only reaches
-  ``confirmed`` when corroboration is backed by a *verified* evidence URL
-  (checked with a real HTTP request, with SSRF protection).
 
-Warm (Turso) and cold (object-store) tiers are a design goal, not part of
-this module yet -- see HANDOFF.md.
+Warm tier (optional, ``agent_neutral_harness.memory.warm``): a shared
+libSQL/Turso replica. Cold tier (optional,
+``agent_neutral_harness.memory.cold``): an S3-compatible object store for
+archived rows. Both are injected into :class:`MemoryVault`; when absent
+the cascade simply stops at the hot tier.
+
+Confidence lifecycle on save:
+- A brand-new claim is ``hypothesis``.
+- A save whose content closely matches an existing memory is treated as
+  *corroboration of that memory* (its counter is bumped and its
+  confidence promoted) rather than a duplicate insert.
+- Promotion is evidence-gated: without a verified, reachable evidence URL
+  a memory is capped at ``suspected`` no matter how often it is restated.
+  ``confirmed`` needs >= ``CONFIRM_MIN_CORROBORATIONS`` and evidence.
+- A save that is *related but not clearly the same* (the review band) is
+  inserted with ``needs_review = 1`` for a human to disambiguate.
 """
 
 import ipaddress
+import json
 import logging
 import os
 import socket
@@ -44,15 +56,22 @@ CHROMA_PATH = os.path.join(DB_DIR, "chroma")
 
 EMBED_MODEL = "all-MiniLM-L6-v2"
 
-# Corroboration / confidence tuning.
-CORROBORATION_MIN_SIMILARITY = 0.65   # cosine similarity for a semantic match
-CONFIRM_MIN_CORROBORATIONS = 1        # corroborating neighbours needed for "confirmed"
+# Save-time confidence-lifecycle thresholds (cosine similarity, 1 = identical).
+CORROBORATION_THRESHOLD = 0.85  # "this is the same finding restated"
+REVIEW_BAND_LOW = 0.5           # below this: unrelated, insert fresh
+REVIEW_BAND_HIGH = 0.85         # [LOW, HIGH): related but same-or-conflicting is unclear
+CONFIRM_MIN_CORROBORATIONS = 3  # corroboration_count needed for "confirmed" (with evidence)
+
+# Search-cascade acceptance thresholds per tier.
+HOT_ACCEPT_THRESHOLD = 0.4      # your own curated data, lowest bar
+WARM_ACCEPT_THRESHOLD = 0.65    # shared / less-curated data, higher bar
+COLD_ACCEPT_THRESHOLD = 0.5     # archived, last resort
 
 VALID_CONFIDENCE = ("hypothesis", "suspected", "confirmed")
 
 _NO_KEYWORD_MATCH = "No matching memories found (checked keyword FTS)."
-_NO_SEMANTIC_MATCH = "No semantic matches found (hot tier)."
-NO_RESULT_MARKERS = (_NO_KEYWORD_MATCH, _NO_SEMANTIC_MATCH)
+_NO_SEMANTIC_MATCH = "No semantic matches found (checked hot, warm, and cold tiers)."
+NO_RESULT_MARKERS = (_NO_KEYWORD_MATCH, _NO_SEMANTIC_MATCH, "No semantic matches found")
 
 
 def _url_is_safe(url: str) -> bool:
@@ -89,11 +108,20 @@ def _sanitize_fts_query(query: str) -> str:
 
 
 class MemoryVault:
-    def __init__(self, db_path: str = DB_PATH, chroma_path: str = CHROMA_PATH):
+    def __init__(
+        self,
+        db_path: str = DB_PATH,
+        chroma_path: str = CHROMA_PATH,
+        warm=None,
+        cold=None,
+    ):
         self.db_path = db_path
         self.chroma_path = chroma_path
+        self.warm = warm
+        self.cold = cold
         os.makedirs(os.path.dirname(self.db_path) or ".", exist_ok=True)
         self._collection = None
+        self._embed_fn = None
         self._chroma_ready = False
         self._init_sqlite()
 
@@ -126,6 +154,9 @@ class MemoryVault:
                     evidence_verified INTEGER DEFAULT 0,
                     confidence TEXT DEFAULT 'hypothesis',
                     corroborations INTEGER DEFAULT 0,
+                    needs_review INTEGER DEFAULT 0,
+                    archived INTEGER DEFAULT 0,
+                    cold_key TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
@@ -152,8 +183,14 @@ class MemoryVault:
             )
             # Backfill columns for vaults created by an earlier version.
             cols = {r["name"] for r in conn.execute("PRAGMA table_info(memories)")}
-            if "evidence_verified" not in cols:
-                conn.execute("ALTER TABLE memories ADD COLUMN evidence_verified INTEGER DEFAULT 0")
+            for col, ddl in (
+                ("evidence_verified", "INTEGER DEFAULT 0"),
+                ("needs_review", "INTEGER DEFAULT 0"),
+                ("archived", "INTEGER DEFAULT 0"),
+                ("cold_key", "TEXT"),
+            ):
+                if col not in cols:
+                    conn.execute(f"ALTER TABLE memories ADD COLUMN {col} {ddl}")
 
     @property
     def collection(self):
@@ -172,14 +209,22 @@ class MemoryVault:
         try:
             os.makedirs(self.chroma_path, exist_ok=True)
             client = chromadb.PersistentClient(path=self.chroma_path)
-            ef = embedding_functions.SentenceTransformerEmbeddingFunction(model_name=EMBED_MODEL)
+            self._embed_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
+                model_name=EMBED_MODEL
+            )
             self._collection = client.get_or_create_collection(
-                name="memories", embedding_function=ef, metadata={"hnsw:space": "cosine"}
+                name="memories", embedding_function=self._embed_fn, metadata={"hnsw:space": "cosine"}
             )
         except Exception:  # pragma: no cover - environment dependent
             log.exception("failed to initialise ChromaDB; falling back to keyword search")
             self._collection = None
         return self._collection
+
+    def embed(self, text: str):
+        """Embed one string with the same model Chroma uses, or ``None``."""
+        if not self.collection or not self._embed_fn:
+            return None
+        return list(self._embed_fn([text])[0])
 
     # ------------------------------------------------------------------ #
     # evidence
@@ -206,7 +251,7 @@ class MemoryVault:
                 SELECT m.id, m.scope, m.type, m.content, m.confidence, m.evidence_url
                 FROM memories_fts f
                 JOIN memories m ON f.rowid = m.id
-                WHERE memories_fts MATCH ?
+                WHERE memories_fts MATCH ? AND COALESCE(m.archived, 0) = 0
                 ORDER BY rank LIMIT ?
                 """,
                 (match_expr, limit),
@@ -219,43 +264,103 @@ class MemoryVault:
         )
 
     def search_semantic(self, query: str, top: int = 5) -> str:
+        """Cascading semantic search: hot -> warm -> cold.
+
+        Anything found in a colder tier is transparently restored into the
+        hot tier before the result is returned.
+        """
         if not self.collection:
             return self.search_keyword(query, top)
-        results = self.collection.query(query_texts=[query], n_results=top)
+
+        results = self.collection.query(
+            query_texts=[query], n_results=top,
+            include=["documents", "metadatas", "distances"],
+        )
         docs = (results.get("documents") or [[]])[0]
-        if not docs:
-            return _NO_SEMANTIC_MATCH
-        metas = (results.get("metadatas") or [[{}] * len(docs)])[0]
-        out = []
-        for doc, meta in zip(docs, metas, strict=False):
-            meta = meta or {}
-            conf = meta.get("confidence", "hypothesis")
-            scope = meta.get("scope", "global")
-            out.append(f"[{scope}] [Confidence: {conf}] {doc}")
-        return "\n".join(out)
+        metas = (results.get("metadatas") or [[]])[0]
+        dists = (results.get("distances") or [[]])[0]
+        hot = [
+            (d, m or {}, 1.0 - float(dist))
+            for d, m, dist in zip(docs, metas, dists, strict=False)
+            if 1.0 - float(dist) >= HOT_ACCEPT_THRESHOLD
+        ]
+        if hot:
+            return "\n".join(
+                f"[{m.get('scope', 'global')}/{m.get('type', 'fact')}, sim={sim:.2f}] {d}"
+                for d, m, sim in hot
+            )
+
+        for tier, label, threshold in (
+            (self.warm, "warm", WARM_ACCEPT_THRESHOLD),
+            (self.cold, "cold", COLD_ACCEPT_THRESHOLD),
+        ):
+            if not tier or self.embed(query) is None:
+                continue
+            try:
+                hits = tier.scan(query, self.embed, threshold=threshold)
+            except Exception:  # pragma: no cover - network/tier dependent
+                log.exception("%s tier scan failed", label)
+                continue
+            if hits:
+                for row in hits:
+                    self._restore(row)
+                return "\n".join(
+                    f"[{r.get('scope', 'global')}/{r.get('type', 'fact')}] {r['content']} "
+                    f"(restored from {label} tier)"
+                    for r in hits
+                )
+        return _NO_SEMANTIC_MATCH
+
+    def _restore(self, row: dict):
+        """Bring a row found in a colder tier back into the hot tier."""
+        content = row["content"]
+        with self._conn() as conn:
+            existing = conn.execute(
+                "SELECT id FROM memories WHERE content = ?", (content,)
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE memories SET archived = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (existing["id"],),
+                )
+                mem_id = existing["id"]
+            else:
+                cur = conn.execute(
+                    "INSERT INTO memories (scope, type, content, confidence) VALUES (?, ?, ?, ?)",
+                    (row.get("scope", "global"), row.get("type", "fact"), content,
+                     row.get("confidence", "hypothesis")),
+                )
+                mem_id = cur.lastrowid
+        if self.collection:
+            try:
+                self.collection.upsert(
+                    ids=[str(mem_id)], documents=[content],
+                    metadatas=[{"scope": row.get("scope", "global"),
+                               "type": row.get("type", "fact")}],
+                )
+            except Exception:  # pragma: no cover
+                log.exception("failed to re-embed restored memory #%s", mem_id)
 
     # ------------------------------------------------------------------ #
     # write path
     # ------------------------------------------------------------------ #
-    def _find_corroborators(self, content: str, top: int = 5) -> list[str]:
-        """IDs of existing memories similar enough to corroborate ``content``."""
+    def _most_similar_active(self, content: str):
+        """``(id, similarity)`` of the single most similar non-archived
+        memory, or ``None`` when there is no semantic tier / no rows."""
         if not self.collection:
-            return []
+            return None
         try:
             res = self.collection.query(
-                query_texts=[content], n_results=top, include=["distances"]
+                query_texts=[content], n_results=1, include=["distances"]
             )
         except Exception:  # pragma: no cover - environment dependent
-            log.exception("corroboration query failed")
-            return []
+            log.exception("similarity query failed")
+            return None
         ids = (res.get("ids") or [[]])[0]
         dists = (res.get("distances") or [[]])[0]
-        hits = []
-        for mem_id, dist in zip(ids, dists, strict=False):
-            similarity = 1.0 - float(dist)  # cosine space
-            if similarity >= CORROBORATION_MIN_SIMILARITY:
-                hits.append(mem_id)
-        return hits
+        if not ids:
+            return None
+        return int(ids[0]), 1.0 - float(dists[0])
 
     def save_memory(
         self,
@@ -265,86 +370,160 @@ class MemoryVault:
         tags: str = "",
         evidence_url: str = "",
     ) -> str:
-        """Persist a memory, scoring its confidence from corroboration + evidence.
-
-        - ``confirmed``  : corroborated by >= CONFIRM_MIN_CORROBORATIONS
-                           existing memories AND backed by a verified
-                           evidence URL.
-        - ``suspected``  : corroborated but without verified evidence.
-        - ``hypothesis`` : no corroboration (the default for genuinely new
-                           information).
-        """
         if not content or not content.strip():
             return "Refused: empty memory content."
 
-        has_evidence = self._verify_evidence_url(evidence_url)
-        corroborators = self._find_corroborators(content)
-        n = len(corroborators)
+        evidence_verified = self._verify_evidence_url(evidence_url)
+        match = self._most_similar_active(content)
 
-        if n >= CONFIRM_MIN_CORROBORATIONS and has_evidence:
-            confidence = "confirmed"
-        elif n >= 1:
-            confidence = "suspected"
-        else:
-            confidence = "hypothesis"
+        if match and match[1] >= CORROBORATION_THRESHOLD:
+            return self._corroborate(match, content, scope, mem_type, evidence_url, evidence_verified)
 
+        needs_review = bool(match and REVIEW_BAND_LOW <= match[1] < REVIEW_BAND_HIGH)
         with self._conn() as conn:
             cur = conn.execute(
                 """
                 INSERT INTO memories
                     (scope, type, content, tags, evidence_url, evidence_verified,
-                     confidence, corroborations)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     confidence, corroborations, needs_review)
+                VALUES (?, ?, ?, ?, ?, ?, 'hypothesis', 1, ?)
                 """,
-                (scope, mem_type, content, tags, evidence_url, int(has_evidence), confidence, n),
+                (scope, mem_type, content, tags, evidence_url or None,
+                 int(evidence_verified), int(needs_review)),
             )
             mem_id = cur.lastrowid
-            if corroborators:
-                conn.executemany(
-                    "UPDATE memories SET corroborations = corroborations + 1, "
-                    "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    [(cid,) for cid in corroborators],
+
+        self._embed(mem_id, content, scope, mem_type, "hypothesis", evidence_verified)
+
+        ev = " (evidence verified)" if evidence_verified else \
+             " (no verified evidence -- capped at 'suspected')"
+        if needs_review:
+            return (
+                f"Saved memory #{mem_id} as hypothesis, flagged needs_review=1 "
+                f"(similar to #{match[0]}, sim={match[1]:.2f} -- unclear if it agrees or conflicts)."
+            )
+        return f"Saved memory #{mem_id} [Confidence: hypothesis]{ev}"
+
+    def _corroborate(self, match, content, scope, mem_type, evidence_url, evidence_verified) -> str:
+        existing_id, sim = match
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT corroborations, evidence_verified FROM memories WHERE id = ?",
+                (existing_id,),
+            ).fetchone()
+            if row is None:  # chroma/sqlite drift -- fall back to a plain insert
+                cur = conn.execute(
+                    "INSERT INTO memories (scope, type, content, evidence_url, evidence_verified, "
+                    "confidence, corroborations) VALUES (?, ?, ?, ?, ?, 'hypothesis', 1)",
+                    (scope, mem_type, content, evidence_url or None, int(evidence_verified)),
                 )
+                new_id = cur.lastrowid
+                self._embed(new_id, content, scope, mem_type, "hypothesis", evidence_verified)
+                return f"Saved memory #{new_id} [Confidence: hypothesis] (stale index; inserted fresh)"
+
+            new_count = (row["corroborations"] or 1) + 1
+            has_evidence = bool(evidence_verified or row["evidence_verified"])
+            if has_evidence:
+                confidence = "confirmed" if new_count >= CONFIRM_MIN_CORROBORATIONS else "suspected"
+            else:
+                confidence = "suspected"  # capped, permanently, without evidence
+
+            attach_evidence = evidence_verified and not row["evidence_verified"]
+            conn.execute(
+                "UPDATE memories SET corroborations = ?, confidence = ?, "
+                "updated_at = CURRENT_TIMESTAMP"
+                + (", evidence_url = ?, evidence_verified = 1" if attach_evidence else "")
+                + " WHERE id = ?",
+                ([new_count, confidence, evidence_url, existing_id] if attach_evidence
+                 else [new_count, confidence, existing_id]),
+            )
 
         if self.collection:
             try:
                 self.collection.upsert(
-                    ids=[str(mem_id)],
-                    documents=[content],
-                    metadatas=[{
-                        "scope": scope,
-                        "type": mem_type,
-                        "confidence": confidence,
-                        "evidence_verified": has_evidence,
-                    }],
+                    ids=[str(existing_id)], documents=[content],
+                    metadatas=[{"scope": scope, "type": mem_type, "confidence": confidence}],
                 )
-            except Exception:  # pragma: no cover - environment dependent
-                log.exception("failed to embed memory #%s", mem_id)
+            except Exception:  # pragma: no cover
+                log.exception("failed to update embedding for corroborated memory #%s", existing_id)
 
-        note = "" if not corroborators else f", {n} corroborator(s)"
-        return f"Saved memory #{mem_id} [Confidence: {confidence}{note}]"
+        ev = " (evidence-backed)" if has_evidence else " (no verified evidence -- capped at suspected)"
+        return (
+            f"Corroborated memory #{existing_id} (sim={sim:.2f}) -- "
+            f"confidence={confidence}, corroborations={new_count}{ev}"
+        )
+
+    def _embed(self, mem_id, content, scope, mem_type, confidence, evidence_verified):
+        if not self.collection:
+            return
+        try:
+            self.collection.upsert(
+                ids=[str(mem_id)], documents=[content],
+                metadatas=[{
+                    "scope": scope, "type": mem_type,
+                    "confidence": confidence, "evidence_verified": bool(evidence_verified),
+                }],
+            )
+        except Exception:  # pragma: no cover - environment dependent
+            log.exception("failed to embed memory #%s", mem_id)
+
+    def list_needs_review(self) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT id, scope, type, content, corroborations FROM memories "
+                "WHERE needs_review = 1 AND COALESCE(archived, 0) = 0 ORDER BY id DESC"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def resolve_review(self, mem_id: int) -> str:
+        with self._conn() as conn:
+            conn.execute("UPDATE memories SET needs_review = 0 WHERE id = ?", (mem_id,))
+        return f"Cleared needs_review on memory #{mem_id}."
 
     def sync_embeddings(self) -> str:
-        """Re-index every SQLite memory row into ChromaDB."""
+        """Re-index every non-archived SQLite memory row into ChromaDB."""
         if not self.collection:
             return "ChromaDB not available (install the 'memory' extra)."
         with self._conn() as conn:
             rows = conn.execute(
-                "SELECT id, scope, type, content, confidence, evidence_verified FROM memories"
+                "SELECT id, scope, type, content, confidence, evidence_verified FROM memories "
+                "WHERE COALESCE(archived, 0) = 0"
             ).fetchall()
         if not rows:
-            return "No rows to sync."
+            return "No active rows to sync."
         self.collection.upsert(
             ids=[str(r["id"]) for r in rows],
             documents=[r["content"] for r in rows],
             metadatas=[
                 {
-                    "scope": r["scope"],
-                    "type": r["type"],
-                    "confidence": r["confidence"],
-                    "evidence_verified": bool(r["evidence_verified"]),
+                    "scope": r["scope"], "type": r["type"],
+                    "confidence": r["confidence"], "evidence_verified": bool(r["evidence_verified"]),
                 }
                 for r in rows
             ],
         )
-        return f"Synced {len(rows)} memories into ChromaDB."
+        return f"Synced {len(rows)} active memories into ChromaDB."
+
+    # exposed for the cold tier
+    def _rows_for_archive(self, cutoff_epoch: int) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM memories WHERE COALESCE(archived, 0) = 0 AND CAST(COALESCE("
+                "strftime('%s', updated_at), strftime('%s', created_at), '0') AS INTEGER) < ?",
+                (int(cutoff_epoch),),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def _mark_archived(self, mem_id: int, cold_key: str):
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE memories SET archived = 1, cold_key = ? WHERE id = ?", (cold_key, mem_id)
+            )
+        if self.collection:
+            try:
+                self.collection.delete(ids=[str(mem_id)])
+            except Exception:  # pragma: no cover
+                log.exception("failed to drop archived memory #%s from ChromaDB", mem_id)
+
+    def _serialize_row(self, row: dict) -> bytes:
+        return json.dumps(row, default=str).encode("utf-8")

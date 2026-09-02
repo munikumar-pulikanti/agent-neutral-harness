@@ -23,6 +23,10 @@ log = logging.getLogger(__name__)
 SHORTCUT_MIN_SAMPLES = 20
 SHORTCUT_ESCALATION_THRESHOLD = 0.8
 SHORTCUT_SAMPLE_RATE = 0.2
+# Compare the threshold against the Wilson lower bound, not the raw rate,
+# so a lucky small sample can't switch the shortcut on. Set False to use
+# the raw fraction.
+SHORTCUT_USE_LOWER_BOUND = True
 
 # Keys ``execute_fn`` may return. Missing keys are tolerated and defaulted.
 _RESULT_DEFAULTS = {
@@ -64,6 +68,7 @@ def run_cascade(
     capable_model: str,
     execute_fn: ExecuteFn,
     random_fn: Callable[[], float] | None = None,
+    config_fingerprint: str = "",
 ) -> str:
     """Run the cascade for one task and return the final content string.
 
@@ -76,6 +81,10 @@ def run_cascade(
         output_tokens: int
         error: str | None   (e.g. "recursion_limit", or an error message)
 
+    ``config_fingerprint`` (see :mod:`agent_neutral_harness.fingerprint`)
+    scopes the escalation-rate history to the current model + prompt +
+    tool schema, so any change to those drops stale rows from the window.
+
     Every turn is logged to :mod:`agent_neutral_harness.metrics`. A
     shortcut-skipped cheap tier is recorded with ``cheap_attempt_tokens``
     NULL so it does not pollute the escalation-rate signal.
@@ -83,11 +92,15 @@ def run_cascade(
     random_fn = random_fn or random.random
     start = time.time()
 
-    stats = metrics.category_escalation_rate(category)
+    stats = metrics.category_escalation_rate(category, config_fingerprint)
+    if SHORTCUT_USE_LOWER_BOUND and stats["escalation_rate_lower_bound"] is not None:
+        rate_signal = stats["escalation_rate_lower_bound"]
+    else:
+        rate_signal = stats["escalation_rate"]
     shortcut_eligible = (
         stats["sample_size"] >= SHORTCUT_MIN_SAMPLES
-        and stats["escalation_rate"] is not None
-        and stats["escalation_rate"] >= SHORTCUT_ESCALATION_THRESHOLD
+        and rate_signal is not None
+        and rate_signal >= SHORTCUT_ESCALATION_THRESHOLD
     )
     skip_cheap = shortcut_eligible and random_fn() > SHORTCUT_SAMPLE_RATE
 
@@ -106,6 +119,7 @@ def run_cascade(
                 assertion_flags=f"capable_tier_error:{result['error']}",
                 cascade_tier="capable", escalated=True,
                 cheap_attempt_tokens=None, capable_attempt_tokens=0,
+                config_fingerprint=config_fingerprint,
             )
             return f"Error: {result['error']}"
 
@@ -120,6 +134,7 @@ def run_cascade(
             input_tokens=result["input_tokens"], output_tokens=result["output_tokens"],
             cascade_tier="capable", escalated=True,
             cheap_attempt_tokens=None, capable_attempt_tokens=_tokens(result),
+            config_fingerprint=config_fingerprint,
         )
         return result["final_content"]
 
@@ -145,6 +160,7 @@ def run_cascade(
             input_tokens=cheap_result["input_tokens"], output_tokens=cheap_result["output_tokens"],
             cascade_tier="cheap", escalated=False,
             cheap_attempt_tokens=cheap_tokens, capable_attempt_tokens=0,
+            config_fingerprint=config_fingerprint,
         )
         return cheap_result["final_content"]
 
@@ -163,6 +179,7 @@ def run_cascade(
             ),
             cascade_tier="capable", escalated=True,
             cheap_attempt_tokens=cheap_tokens, capable_attempt_tokens=0,
+            config_fingerprint=config_fingerprint,
         )
         return f"Error: {capable_result['error']}"
 
@@ -182,5 +199,6 @@ def run_cascade(
         input_tokens=capable_result["input_tokens"], output_tokens=capable_result["output_tokens"],
         cascade_tier="capable", escalated=True,
         cheap_attempt_tokens=cheap_tokens, capable_attempt_tokens=_tokens(capable_result),
+        config_fingerprint=config_fingerprint,
     )
     return capable_result["final_content"]

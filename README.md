@@ -28,28 +28,34 @@ parameters — nothing here hardcodes a model or a provider.
 | `metrics` | Per-turn SQLite log (model, tokens, tier, escalation, flags) + eval baselines/results. | ✅ Working, tested |
 | `routing.classifier` | Lightweight task-intent classifier (`investigate` / `implement` / `unit_tests` / `extract` / `general`). Ollama by default; inject any `generate_fn`. | ✅ Working, tested |
 | `routing.curator` | Filter retrieved memories for *actual task relevance* before prompt injection, not just semantic similarity. | ✅ Working, tested |
-| `memory.vault` | SQLite + FTS5 keyword search, optional ChromaDB semantic search, **evidence-gated confidence** (`hypothesis` → `suspected` → `confirmed`, where `confirmed` requires a verified evidence URL). | ✅ Hot tier working |
-| `memory.mcp_server` | FastMCP server exposing the vault to any MCP client (Claude Desktop, Cursor, Windsurf, …). | ✅ Working |
+| `fingerprint` | Combine model digest + system prompt + tool schema into one hash so an escalation-rate window is invalidated when any of them changes. | ✅ Working, tested |
+| `memory.vault` | SQLite + FTS5 keyword search, optional ChromaDB semantic search, **evidence-gated confidence** (`hypothesis` → `suspected` → `confirmed`). A restated claim corroborates the existing memory instead of duplicating; without a verified evidence URL a memory is capped at `suspected`. Hot → warm → cold search cascade. | ✅ Working, tested |
+| `memory.warm` (`[warm]`) | Push/pull sync with a shared libSQL/Turso replica. | ✅ Working (sync logic tested; live Turso not in CI) |
+| `memory.cold` (`[cold]`) | Archive idle rows to an S3-compatible store (S3, MinIO, R2, B2); auto-restore on a search hit. | ✅ Working (tested with an in-memory store) |
+| `memory.mcp_server` (`[mcp]`) | FastMCP server exposing the vault to any MCP client (Claude Desktop, Cursor, Windsurf, …). | ✅ Working |
 | `evals.runner` | Re-run golden baselines through your agent, grade with an LLM judge, record pass/fail. | ✅ Working, tested |
-| Warm tier (Turso) / cold tier (object store) | Cross-machine sync + archival. | 🔨 Designed, not built — see [HANDOFF.md](HANDOFF.md) |
-| Dashboard | Visualize the metrics DB. | 🔨 Not in this repo yet |
+| `dashboard` (`[dashboard]`) | Streamlit view of the metrics DB — routing, reliability flags, cost, eval pass rate. | ✅ Working |
 
 ---
 
 ## Install
 
 ```bash
-pip install "agent-neutral-harness[all]"        # everything
-pip install "agent-neutral-harness"             # core only (cascade + assertions + metrics + routing)
-pip install "agent-neutral-harness[memory]"     # + semantic memory search (ChromaDB)
-pip install "agent-neutral-harness[mcp]"        # + MCP server
+pip install "agent-neutral-harness"              # core only (cascade + assertions + metrics + routing + fingerprint)
+pip install "agent-neutral-harness[memory]"      # + semantic memory search (ChromaDB + local embeddings)
+pip install "agent-neutral-harness[mcp]"         # + MCP server
+pip install "agent-neutral-harness[warm]"        # + Turso warm tier
+pip install "agent-neutral-harness[cold]"        # + object-store cold tier
+pip install "agent-neutral-harness[dashboard]"   # + Streamlit dashboard
+pip install "agent-neutral-harness[all]"         # everything
 ```
 
 Local development:
 
 ```bash
 uv sync --group dev --extra all
-uv run pytest
+uv run pytest                     # fast suite
+uv run pytest -m semantic         # + real ChromaDB tests (needs [memory])
 uv run ruff check .
 ```
 
@@ -78,14 +84,26 @@ answer = run_cascade(
     cheap_model="llama3.2:3b",
     capable_model="llama3.1:8b",
     execute_fn=execute_fn,
+    config_fingerprint=fp,   # optional, see below
 )
 ```
 
 The cheap tier is only trusted if its output passes every deterministic check.
 Escalation happens on **observed** failure, never a confidence guess. Once a
-category's recent escalation rate passes 80% (min 20 samples), the cascade starts
+category's recent escalation rate clears 80% (min 20 samples), the cascade starts
 skipping the cheap tier for it — but still samples it 20% of the time so it can
 notice the cheap model getting better.
+
+Two things keep that decision honest:
+
+- It compares the threshold against the **Wilson score lower bound** of the rate,
+  not the raw fraction — a lucky run of 18/20 doesn't flip the shortcut on.
+- Pass a **`config_fingerprint`** (`fingerprint.config_fingerprint(model_digest=…,
+  system_prompt=…, tools=…)`) and the escalation-rate history is scoped to it, so
+  a model weight swap, a prompt edit, or a tool-schema change drops stale rows
+  from the window instead of dragging the decision for ~50 turns.
+  `metrics.detect_within_window_drift(category)` flags a behaviour change that
+  leaves the fingerprint unchanged (e.g. a meaningful tool-description rewrite).
 
 ### Reliability checks standalone
 
@@ -120,9 +138,38 @@ Claude Desktop / Cursor / Windsurf MCP config:
 ```
 
 Tools exposed: `search_memory`, `search_memory_semantic`, `save_memory`,
-`sync_embeddings`. A saved memory starts as `hypothesis` and is only promoted to
-`confirmed` when a similar memory already exists **and** the supplied
-`evidence_url` is real and reachable (checked with an SSRF-guarded HTTP request).
+`sync_embeddings`. A saved memory starts as `hypothesis`. A restated claim
+corroborates the existing memory (bumping its count) instead of duplicating it;
+`confirmed` needs 3+ corroborations **and** a verified, reachable `evidence_url`
+(checked with an SSRF-guarded HTTP request). Without evidence a memory is capped
+at `suspected` no matter how often it's restated.
+
+### Warm & cold tiers
+
+```python
+from agent_neutral_harness.memory.vault import MemoryVault
+from agent_neutral_harness.memory.warm import TursoWarmTier
+from agent_neutral_harness.memory.cold import ObjectStoreColdTier
+
+warm = TursoWarmTier(local_db_path=DB, sync_url=..., auth_token=...)   # [warm]
+cold = ObjectStoreColdTier(bucket="my-cold", endpoint="http://localhost:9000",
+                           access_key="...", secret_key="...")          # [cold]
+
+vault = MemoryVault(warm=warm, cold=cold)
+
+warm.push(); warm.pull()                 # sync the shared replica
+cold.archive(vault, days=90)             # push idle rows to the object store
+```
+
+`vault.search_semantic()` then cascades hot → warm → cold, restoring anything it
+finds in a colder tier back into hot.
+
+### Dashboard
+
+```bash
+pip install "agent-neutral-harness[dashboard]"
+agent-neutral-dashboard
+```
 
 ---
 
@@ -134,6 +181,7 @@ Tools exposed: `search_memory`, `search_memory_semantic`, `save_memory`,
 | `AGENT_NEUTRAL_HARNESS_METRICS_DB` | `<home>/metrics.db` | Metrics DB path |
 | `AI_MEMORY_VAULT_DIR` | `~/.ai-memory-vault` | Memory vault dir (SQLite + Chroma) |
 | `AGENT_NEUTRAL_HARNESS_LOG` | `INFO` | Log level for the MCP server |
+| `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN` | — | Warm-tier credentials (if not passed explicitly) |
 
 ---
 

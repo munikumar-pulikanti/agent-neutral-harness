@@ -14,12 +14,15 @@ Public API:
 __version__ = "0.1.0"
 
 from agent_neutral_harness.cascade import run_cascade
+from agent_neutral_harness.fingerprint import config_fingerprint, ollama_model_digest
 from agent_neutral_harness.reliability.assertions import run_all_checks
 
 __all__ = [
     "__version__",
     "run_cascade",
     "run_all_checks",
+    "config_fingerprint",
+    "ollama_model_digest",
     "MemoryVault",
     "classify_task",
     "curate_memories",

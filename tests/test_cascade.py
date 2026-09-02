@@ -76,3 +76,20 @@ def test_shortcut_skips_cheap_when_category_escalation_is_high(metrics_mod):
     out = cascade.run_cascade("t", "implement", "cheap", "capable", ex, random_fn=lambda: 0.99)
     assert out == "All good."
     assert ex.calls == ["capable"]
+
+
+def test_shortcut_history_is_scoped_to_config_fingerprint(metrics_mod):
+    # 20 escalated turns, but all under a STALE fingerprint
+    for _ in range(cascade.SHORTCUT_MIN_SAMPLES):
+        metrics_mod.log_turn(
+            task_snippet="t", category="implement", model="capable", duration_seconds=0.1,
+            escalated=True, cheap_attempt_tokens=1, config_fingerprint="STALE",
+        )
+    ex = make_execute({"cheap": GOOD, "capable": GOOD})
+    out = cascade.run_cascade(
+        "t", "implement", "cheap", "capable", ex,
+        random_fn=lambda: 0.99, config_fingerprint="CURRENT",
+    )
+    # stale history doesn't count -> cheap tier is still tried
+    assert out == "All good."
+    assert ex.calls == ["cheap"]

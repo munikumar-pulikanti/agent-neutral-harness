@@ -32,12 +32,26 @@ memory = [
 mcp = [
     "mcp<2",
 ]
+# Warm tier: shared libSQL / Turso replica.
+warm = [
+    "libsql-experimental>=0.0.40",
+]
+# Cold tier: S3-compatible object store (AWS S3, MinIO, R2, B2).
+cold = [
+    "boto3>=1.26.0",
+]
+# Streamlit metrics dashboard.
+dashboard = [
+    "streamlit>=1.30.0",
+    "pandas>=2.0.0",
+]
 all = [
-    "agent-neutral-harness[memory,mcp]",
+    "agent-neutral-harness[memory,mcp,warm,cold,dashboard]",
 ]
 
 [project.scripts]
 agent-neutral-memory = "agent_neutral_harness.memory.mcp_server:main"
+agent-neutral-dashboard = "agent_neutral_harness.dashboard:main"
 
 [project.urls]
 Homepage = "https://github.com/munikumar-pulikanti/agent-neutral-harness"
@@ -66,3 +80,7 @@ ignore = ["E501"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-m 'not semantic'"
+markers = [
+    "semantic: needs the 'memory' extra (ChromaDB + embedding model download); run with -m semantic",
+]
