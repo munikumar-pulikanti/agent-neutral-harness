@@ -17,6 +17,24 @@ tools over MCP.
 Runs fully local by default (Ollama, CPU, no API key). Model names are always
 parameters — nothing here hardcodes a model or a provider.
 
+![architecture](docs/architecture.svg)
+
+---
+
+## Try it in 30 seconds
+
+```bash
+git clone https://github.com/munikumar-pulikanti/agent-neutral-harness
+cd agent-neutral-harness
+pip install -e .
+python examples/quickstart.py
+```
+
+[`examples/quickstart.py`](examples/quickstart.py) needs no Ollama and no API key —
+it fakes an `execute_fn`, classifies a task, runs the cheap tier, catches a
+fabricated filename in the summary, and escalates. [`examples/`](examples/) has the
+same flow against real Ollama and wrapped around a LangGraph agent.
+
 ---
 
 ## What's here
