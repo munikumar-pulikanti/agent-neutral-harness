@@ -16,3 +16,6 @@ htmlcov/
 *.sqlite3
 .DS_Store
 .env
+
+# pre-launch scratch (LinkedIn drafts, release notes) -- never publish
+.launch/
