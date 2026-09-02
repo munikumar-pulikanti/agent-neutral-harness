@@ -1,6 +1,20 @@
-"""Task classifier using lightweight local LLM (e.g., llama3.2:1b)."""
+"""Task classifier.
+
+Defaults to a local Ollama model (``llama3.2:1b``) but any text-in /
+text-out callable can be injected via ``generate_fn`` to keep routing
+provider-neutral.
+"""
+
+import logging
+import re
+from collections.abc import Callable
 
 import requests
+
+log = logging.getLogger(__name__)
+
+CATEGORIES = ("investigate", "implement", "unit_tests", "extract", "general")
+DEFAULT_CATEGORY = "general"
 
 CLASSIFIER_PROMPT = """You are a task classifier. Given the following user request, determine the primary category.
 Categories:
@@ -15,18 +29,46 @@ Respond with ONLY the single category name, in lowercase.
 User request: {task}
 Category:"""
 
+GenerateFn = Callable[[str], str]
 
-def classify_task(task: str, model: str = "llama3.2:1b", base_url: str = "http://localhost:11434") -> str:
-    prompt = CLASSIFIER_PROMPT.format(task=task)
-    try:
+
+def _ollama_generate(model: str, base_url: str, timeout: float) -> GenerateFn:
+    def _gen(prompt: str) -> str:
         resp = requests.post(
             f"{base_url}/api/generate",
             json={"model": model, "prompt": prompt, "stream": False, "options": {"temperature": 0}},
-            timeout=10,
-        ).json()
-        category = resp.get("response", "").strip().lower()
-        if category in {"investigate", "implement", "unit_tests", "extract", "general"}:
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        return resp.json().get("response", "")
+
+    return _gen
+
+
+def _coerce_category(raw: str) -> str:
+    # Collapse every non-letter run to a single "_" so "Category: implement."
+    # and "unit tests" both normalise cleanly ("category_implement",
+    # "unit_tests"), then match a category as a whole token.
+    normalized = re.sub(r"[^a-z]+", "_", raw.lower()).strip("_")
+    for category in CATEGORIES:
+        if re.search(rf"(^|_){category}($|_)", normalized):
             return category
-    except Exception:
-        pass
-    return "general"
+    log.debug("classifier returned unrecognised category %r", raw)
+    return DEFAULT_CATEGORY
+
+
+def classify_task(
+    task: str,
+    model: str = "llama3.2:1b",
+    base_url: str = "http://localhost:11434",
+    timeout: float = 10.0,
+    generate_fn: GenerateFn | None = None,
+) -> str:
+    """Return one of :data:`CATEGORIES`, falling back to ``general`` on any error."""
+    gen = generate_fn or _ollama_generate(model, base_url, timeout)
+    try:
+        raw = gen(CLASSIFIER_PROMPT.format(task=task))
+    except Exception:  # noqa: BLE001 - classification must never be fatal
+        log.warning("task classification failed; defaulting to %r", DEFAULT_CATEGORY, exc_info=True)
+        return DEFAULT_CATEGORY
+    return _coerce_category(raw or "")

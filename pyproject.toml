@@ -4,23 +4,65 @@ version = "0.1.0"
 description = "A universal, agent-neutral reliability, memory, and model-routing harness for AI coding workflows."
 readme = "README.md"
 requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Muni Kumar Pulikanti" }]
+keywords = ["llm", "agents", "mcp", "memory", "model-routing", "reliability", "evals", "ollama"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+]
+
+# Core install is deliberately tiny -- everything heavier is an extra.
 dependencies = [
-    "mcp<2",
+    "requests>=2.31.0",
+]
+
+[project.optional-dependencies]
+# Semantic memory search (vector store + local embeddings).
+memory = [
     "chromadb>=0.5.0",
     "sentence-transformers>=2.2.2",
-    "requests>=2.31.0",
-    "pyyaml>=6.0",
-    "fastapi>=0.110.0",
-    "uvicorn>=0.28.0",
-    "pydantic>=2.6.0",
-    "boto3>=1.26.0",
 ]
+# Expose the memory vault over MCP to any compatible client.
+mcp = [
+    "mcp<2",
+]
+all = [
+    "agent-neutral-harness[memory,mcp]",
+]
+
+[project.scripts]
+agent-neutral-memory = "agent_neutral_harness.memory.mcp_server:main"
+
+[project.urls]
+Homepage = "https://github.com/munikumar-pulikanti/agent-neutral-harness"
+Issues = "https://github.com/munikumar-pulikanti/agent-neutral-harness/issues"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.uv]
-dev-dependencies = [
+[tool.hatch.build.targets.wheel]
+packages = ["agent_neutral_harness"]
+
+[dependency-groups]
+dev = [
     "pytest>=8.0.0",
+    "ruff>=0.6.0",
 ]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
