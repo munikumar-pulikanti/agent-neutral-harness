@@ -160,13 +160,52 @@ Added:
   green against real containers on 2026-09-02.
 
 Test lanes now: `pytest` (fast), `-m semantic` (real ChromaDB), `-m integration`
-(real MinIO + libSQL). 65 tests total.
+(real MinIO + libSQL). 69 tests total (66 fast lane).
+
+## Fourth pass (pre-launch hardening, this session) -- 0.1.0 -> 0.2.0
+
+Prompted by a Staff-level portfolio review before the public/LinkedIn launch.
+Full findings and rationale in [`DESIGN.md`](DESIGN.md) and
+[`docs/owasp-agentic-mapping.md`](docs/owasp-agentic-mapping.md); summary:
+
+- **Fixed a real SSRF gap** in `memory.vault._verify_evidence_url`: it used
+  `requests.head(..., allow_redirects=True)`, which follows a redirect to
+  *any* target with no safety re-check -- a URL that passed `_url_is_safe`
+  could 302 to a private/internal host (e.g. cloud metadata) and be
+  followed anyway. Now walks redirects manually, re-validating each hop.
+  4 new tests in `test_vault.py`. Residual known gap (DNS-rebinding TOCTOU)
+  documented in `SECURITY.md`, not silently ignored.
+- **Fixed known gap #1** (`classify_task` picking the first matching
+  category in declaration order on an ambiguous reply) -- now falls back to
+  `DEFAULT_CATEGORY` on 0 or 2+ matches instead of guessing. Test added.
+- **Breaking API change, `run_cascade`:** errors from the capable tier used
+  to return as an `"Error: ..."` string indistinguishable from real model
+  output. Now raises `CascadeError` instead. Done now (v0.1.0 has ~zero
+  external adoption -- cheapest time to break this). Bumped to **0.2.0**.
+  `examples/*.py` checked -- none string-matched `"Error:"`, none needed
+  updating.
+- **Added `mypy` as a CI job** (`typecheck`, alongside `test`/`semantic`/
+  `integration`). Codebase was already clean except one real type-narrowing
+  bug in `metrics._window` (fixed, `params: tuple[object, ...]`).
+- **Added `SECURITY.md`**, **`DESIGN.md`**, and
+  **`docs/owasp-agentic-mapping.md`** (honest mapping against the OWASP Top
+  10 for Agentic Applications, published 2025-12-09 -- three categories
+  are genuine strengths already in the design, ASI01 goal-hijack is an
+  honestly-stated gap, not glossed over).
+- **README**: added a "Why not just use X?" section (LiteLLM, Mem0/Zep/
+  Letta) so a skeptical reader isn't left to guess the differentiation, and
+  a "More reading" section linking the new docs.
+- **Still open, not done this pass:** a real LongMemEval-style benchmark
+  against `MemoryVault` (in progress, separate task) -- the differentiator
+  claim (evidence-gated confidence) is stated in README/DESIGN.md without
+  a fabricated number; a real result gets added once run, not invented.
+- **Before going public:** this pass needs its own tag (`v0.2.0`) same as
+  the prior note about `v0.1.0`'s artifacts predating later commits --
+  re-cut before `gh repo edit --visibility public`.
 
 ## Known gaps / open items
 
-1. **`classify_task` loose-matches** the category name as a token in the model's
-   reply. A verbose reply mentioning two category words returns the first in
-   `CATEGORIES` order.
+1. ~~`classify_task` loose-matches...~~ Fixed this pass (see above).
 2. **Corroboration re-promotion is one-directional.** A new save promotes the
    memory it matches, but a memory promoted to `suspected` earlier is not
    re-checked for `confirmed` if evidence is attached to a *different* corroborator
@@ -178,6 +217,12 @@ Test lanes now: `pytest` (fast), `-m semantic` (real ChromaDB), `-m integration`
 4. **libSQL integration test tolerates an unreachable server** (skips rather than
    fails) so a flaky image pull doesn't red the build. If the warm tier silently
    regressed and the server also failed to start, that job would go green.
+5. **No A2A (agent-to-agent) protocol support.** `[mcp]` shares memory across
+   tools on one machine; there's no A2A transport. A2A reached Linux
+   Foundation v1.0 and real production use across multiple industries in
+   2026 -- industry sources now describe MCP + A2A as the two protocols a
+   cross-vendor agent stack is expected to speak. Worth a real look, not
+   implemented.
 
 ## Working conventions
 

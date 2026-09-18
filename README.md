@@ -56,6 +56,30 @@ same flow against real Ollama and wrapped around a LangGraph agent.
 
 ---
 
+## Why not just use X?
+
+**LiteLLM** — the standard MIT-licensed multi-provider gateway (normalizes
+providers behind one OpenAI-style endpoint, with fallback routing). It
+solves a different problem: *which provider* answers a call. This harness
+sits a layer above that question — *should the cheap model's answer be
+trusted at all*, verified against its own real output, before anything
+escalates. The two compose: point `execute_fn` at a LiteLLM-routed call and
+the cascade/reliability logic runs on top of it unchanged.
+
+**Mem0 / Zep / Letta / Graphiti** (agent memory) — genuinely strong systems,
+each optimized for a different shape of memory: Mem0 for layered
+conversation memory, Zep for temporal knowledge graphs, Letta for
+agent-managed context. None of them do **evidence-gated confidence**: a
+memory here can't reach `confirmed` from repetition alone — it needs a
+verified, reachable evidence URL, or it's permanently capped at `suspected`
+no matter how many times it's restated (see [`DESIGN.md`](DESIGN.md)). If
+your failure mode is "the agent confidently remembered something false
+because it said so three times," that's the specific gap this fills; if
+you need Zep-grade temporal reasoning over a large conversation graph, use
+Zep.
+
+---
+
 ## Install
 
 ```bash
@@ -207,6 +231,15 @@ agent-neutral-dashboard
 | `AI_MEMORY_VAULT_DIR` | `~/.ai-memory-vault` | Memory vault dir (SQLite + Chroma) |
 | `AGENT_NEUTRAL_HARNESS_LOG` | `INFO` | Log level for the MCP server |
 | `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN` | — | Warm-tier credentials (if not passed explicitly) |
+
+---
+
+## More reading
+
+- [`DESIGN.md`](DESIGN.md) — the reasoning behind the harder decisions (Wilson-bound shortcuts, fingerprint scoping, evidence-gated confidence), pulled into one place.
+- [`SECURITY.md`](SECURITY.md) — vulnerability reporting, and what the SSRF guard on evidence URLs does and doesn't cover.
+- [`docs/owasp-agentic-mapping.md`](docs/owasp-agentic-mapping.md) — an honest mapping against the [OWASP Top 10 for Agentic Applications (2026)](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/): what this harness actually covers, and what it explicitly doesn't.
+- [`HANDOFF.md`](HANDOFF.md) — full project state for anyone (human or agent) picking this up cold.
 
 ---
 
