@@ -160,6 +160,10 @@ def _window(conn, category: str, config_fingerprint):
     invalidates stale history instead of dragging the decision for a
     whole window.
     """
+    # Explicitly typed as a variable-length tuple: the two branches below
+    # bind 3 and 2 params respectively, which a bare `params = (...)` would
+    # otherwise narrow to a fixed-length tuple type from the first branch.
+    params: tuple[object, ...]
     if config_fingerprint:
         sql = (
             "SELECT escalated, timestamp FROM turns WHERE category = ? "

@@ -29,6 +29,22 @@ jobs:
       - name: Test (fast, no semantic tier)
         run: uv run pytest -q
 
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install (core + dev)
+        run: uv sync --group dev
+
+      - name: mypy
+        run: uv run mypy
+
   semantic:
     runs-on: ubuntu-latest
     steps:
