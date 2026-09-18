@@ -59,10 +59,26 @@ def test_execute_fn_exception_is_contained():
     assert out == "All good."
 
 
-def test_capable_error_returns_error_string():
+def test_capable_error_raises_cascade_error_after_escalation():
     ex = make_execute({"cheap": LEAKY, "capable": {**GOOD, "error": "boom"}})
-    out = cascade.run_cascade("t", "general", "cheap", "capable", ex, random_fn=lambda: 0.0)
-    assert out == "Error: boom"
+    with pytest.raises(cascade.CascadeError) as exc_info:
+        cascade.run_cascade("t", "general", "cheap", "capable", ex, random_fn=lambda: 0.0)
+    assert str(exc_info.value) == "boom"
+    assert exc_info.value.tier == "capable"
+    assert exc_info.value.cheap_error  # cheap tier's own flags carried along
+
+
+def test_capable_error_on_shortcut_path_raises_cascade_error(metrics_mod):
+    for _ in range(cascade.SHORTCUT_MIN_SAMPLES):
+        metrics_mod.log_turn(
+            task_snippet="t", category="implement", model="capable",
+            duration_seconds=0.1, escalated=True, cheap_attempt_tokens=1,
+        )
+    ex = make_execute({"cheap": GOOD, "capable": {**GOOD, "error": "boom"}})
+    with pytest.raises(cascade.CascadeError) as exc_info:
+        cascade.run_cascade("t", "implement", "cheap", "capable", ex, random_fn=lambda: 0.99)
+    assert str(exc_info.value) == "boom"
+    assert exc_info.value.cheap_error is None  # shortcut path never ran the cheap tier
 
 
 def test_shortcut_skips_cheap_when_category_escalation_is_high(metrics_mod):

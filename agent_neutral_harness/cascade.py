@@ -42,6 +42,28 @@ _RESULT_DEFAULTS = {
 ExecuteFn = Callable[[str, str], dict]
 
 
+class CascadeError(RuntimeError):
+    """Raised when the capable tier itself errors (its own ``execute_fn``
+    failure, not a reliability-check failure) -- either after cheap-tier
+    escalation, or on the shortcut path where only the capable tier runs.
+
+    Before v0.2.0 this case returned an ``"Error: ..."`` string with the
+    same type as real model output, so a caller had no reliable way to
+    distinguish an actual failure from content that happened to start with
+    "Error:". Raising instead makes failure structurally distinguishable.
+    Breaking change, made now while v0.1.0 has ~zero external adoption --
+    the cheapest time to fix this is before there's any callers to break.
+
+    ``cheap_error`` is set when escalation (not the shortcut path) is what
+    led here, joining whatever reliability flags triggered it.
+    """
+
+    def __init__(self, message: str, *, cheap_error: str | None = None):
+        super().__init__(message)
+        self.tier = "capable"
+        self.cheap_error = cheap_error
+
+
 def _safe_execute(execute_fn: ExecuteFn, model: str, task: str) -> dict:
     """Call ``execute_fn`` and always return a normalized result dict.
 
@@ -80,6 +102,11 @@ def run_cascade(
         input_tokens: int
         output_tokens: int
         error: str | None   (e.g. "recursion_limit", or an error message)
+
+    Raises :class:`CascadeError` if the capable tier itself errors (its own
+    ``execute_fn`` failure -- not a reliability-check failure). The cheap
+    tier's own errors never raise: they are treated as an observed failure
+    like any reliability-check flag and escalate normally.
 
     ``config_fingerprint`` (see :mod:`agent_neutral_harness.fingerprint`)
     scopes the escalation-rate history to the current model + prompt +
@@ -121,7 +148,7 @@ def run_cascade(
                 cheap_attempt_tokens=None, capable_attempt_tokens=0,
                 config_fingerprint=config_fingerprint,
             )
-            return f"Error: {result['error']}"
+            raise CascadeError(result["error"])
 
         flags = run_all_checks(
             result["final_content"], result["tools_invoked"], result["tool_results"]
@@ -181,7 +208,7 @@ def run_cascade(
             cheap_attempt_tokens=cheap_tokens, capable_attempt_tokens=0,
             config_fingerprint=config_fingerprint,
         )
-        return f"Error: {capable_result['error']}"
+        raise CascadeError(capable_result["error"], cheap_error=",".join(cheap_flags))
 
     capable_flags = run_all_checks(
         capable_result["final_content"],

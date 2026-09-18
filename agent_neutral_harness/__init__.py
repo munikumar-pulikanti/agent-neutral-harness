@@ -3,6 +3,7 @@ for AI coding agents.
 
 Public API:
     run_cascade            -- cheap-first, verify-then-escalate execution
+    CascadeError            -- raised when the capable tier itself errors
     run_all_checks         -- deterministic reliability assertions
     MemoryVault            -- persistent memory with evidence-gated confidence
     classify_task          -- lightweight task-intent classifier
@@ -11,15 +12,16 @@ Public API:
     run_regression_suite   -- golden-baseline regression runner
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
-from agent_neutral_harness.cascade import run_cascade
+from agent_neutral_harness.cascade import CascadeError, run_cascade
 from agent_neutral_harness.fingerprint import config_fingerprint, ollama_model_digest
 from agent_neutral_harness.reliability.assertions import run_all_checks
 
 __all__ = [
     "__version__",
     "run_cascade",
+    "CascadeError",
     "run_all_checks",
     "config_fingerprint",
     "ollama_model_digest",
