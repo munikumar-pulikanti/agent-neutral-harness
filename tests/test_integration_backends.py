@@ -13,6 +13,7 @@ Run locally, e.g.::
 """
 
 import os
+import time
 import uuid
 
 import pytest
@@ -89,16 +90,31 @@ def libsql_warm(vault):
     pytest.importorskip("libsql_experimental")
     from agent_neutral_harness.memory.warm import TursoWarmTier
 
-    try:
-        tier = TursoWarmTier(
-            vault=vault, sync_url=url,
-            auth_token=os.environ.get("LIBSQL_AUTH_TOKEN", ""),
-            replica_path=f"/tmp/anh-warm-{uuid.uuid4().hex[:8]}.db",
-        )
-        tier._remote()  # force a connection now so an unreachable server -> skip
-    except Exception as exc:  # noqa: BLE001
-        pytest.skip(f"libSQL server not usable: {exc}")
-    return tier
+    tier = TursoWarmTier(
+        vault=vault, sync_url=url,
+        auth_token=os.environ.get("LIBSQL_AUTH_TOKEN", ""),
+        replica_path=f"/tmp/anh-warm-{uuid.uuid4().hex[:8]}.db",
+    )
+    # LIBSQL_URL being set is an explicit assertion that a real server should
+    # be reachable here -- unlike the "not set" skip above, a connection
+    # failure at this point is a real failure (broken CI service container,
+    # or an actual regression in the warm tier), not something to swallow
+    # into a skip. That used to make this job go green even if the warm
+    # tier silently broke and the server also failed to start -- the two
+    # failures would cancel out into a false pass.
+    #
+    # Retries absorb the container's own startup lag (a timing issue, not a
+    # reason to treat a genuine failure as a skip) before giving up.
+    last_exc: Exception | None = None
+    for attempt in range(5):
+        try:
+            tier._remote()
+            return tier
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if attempt < 4:
+                time.sleep(2)
+    raise RuntimeError(f"libSQL at {url} did not become reachable: {last_exc}") from last_exc
 
 
 def test_warm_push_pull_roundtrip_real_libsql(vault, libsql_warm):

@@ -219,14 +219,22 @@ Full findings and rationale in [`DESIGN.md`](DESIGN.md) and
 2. **Corroboration re-promotion is one-directional.** A new save promotes the
    memory it matches, but a memory promoted to `suspected` earlier is not
    re-checked for `confirmed` if evidence is attached to a *different* corroborator
-   later. Revisit only if it bites.
+   later. Revisit only if it bites -- deliberately not touched this pass: subtle
+   logic, no concrete failure driving a fix, real risk of introducing a new bug
+   chasing a hypothetical one.
 3. **Warm `push()` doesn't detect a divergent edit at push time** -- only `pull()`
    does (via `save_memory`). If machine A edits a memory and pushes, and nobody
    ever pulls on A, A won't see B's conflicting version. Acceptable: pull is the
-   sync direction where review belongs.
-4. **libSQL integration test tolerates an unreachable server** (skips rather than
-   fails) so a flaky image pull doesn't red the build. If the warm tier silently
-   regressed and the server also failed to start, that job would go green.
+   sync direction where review belongs. (Deliberate design decision, not revisited.)
+4. ~~libSQL integration test tolerates an unreachable server~~ Fixed this pass:
+   `tests/test_integration_backends.py`'s `libsql_warm` fixture now only skips
+   when `LIBSQL_URL` is unset; if it's set but the server doesn't become
+   reachable after 5 retries (~10s, absorbing container startup lag), the
+   fixture raises instead of skipping -- a broken CI service container or a
+   real warm-tier regression now fails the job instead of silently passing.
+   Caveat: only verified by reading the retry/raise logic, not by an actual
+   CI run against a live libSQL container (no such container available in
+   this session) -- worth confirming on the first real CI run after push.
 5. **No A2A (agent-to-agent) protocol support.** `[mcp]` shares memory across
    tools on one machine; there's no A2A transport. A2A reached Linux
    Foundation v1.0 and real production use across multiple industries in
