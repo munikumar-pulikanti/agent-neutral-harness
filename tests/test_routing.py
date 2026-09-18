@@ -12,6 +12,15 @@ def test_classify_task_unknown_falls_back_to_general():
     assert classify_task("x", generate_fn=lambda p: "banana") == "general"
 
 
+def test_classify_task_ambiguous_reply_falls_back_to_general_not_first_category():
+    # Mentions two categories -- "investigate" happens to be first in
+    # CATEGORIES order, which used to be returned by accident. There's no
+    # honest way to prefer one, so this must fail safe to the default
+    # instead of silently guessing declaration order.
+    reply = "This looks like it could be an investigate task, or maybe implement."
+    assert classify_task("x", generate_fn=lambda p: reply) == "general"
+
+
 def test_classify_task_error_falls_back_to_general():
     def boom(_):
         raise RuntimeError("no ollama")

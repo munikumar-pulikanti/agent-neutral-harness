@@ -50,10 +50,15 @@ def _coerce_category(raw: str) -> str:
     # and "unit tests" both normalise cleanly ("category_implement",
     # "unit_tests"), then match a category as a whole token.
     normalized = re.sub(r"[^a-z]+", "_", raw.lower()).strip("_")
-    for category in CATEGORIES:
-        if re.search(rf"(^|_){category}($|_)", normalized):
-            return category
-    log.debug("classifier returned unrecognised category %r", raw)
+    matches = [c for c in CATEGORIES if re.search(rf"(^|_){c}($|_)", normalized)]
+    if len(matches) == 1:
+        return matches[0]
+    # Zero matches: unrecognised reply. More than one: a verbose reply named
+    # two categories and there's no honest way to prefer one -- guessing the
+    # first in CATEGORIES order (the old behaviour) is arbitrary, not a real
+    # classification. Both fail safe to the default rather than guess.
+    log.debug("classifier reply %r resolved to %d category matches %r; defaulting to %r",
+               raw, len(matches), matches, DEFAULT_CATEGORY)
     return DEFAULT_CATEGORY
 
 
