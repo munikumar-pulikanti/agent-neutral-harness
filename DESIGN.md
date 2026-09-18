@@ -75,6 +75,15 @@ consensus out of an echo chamber, not verification. See
 ASI09) for how this maps to memory-poisoning and trust-exploitation risk
 categories directly.
 
+That's the design intent; [`bench/`](bench/) has a real, reproducible
+LongMemEval run measuring what it actually retrieves (9/12, see the
+README) — including an honest miss on temporal-reasoning questions, which
+is a retrieval-strategy gap, not a confidence-lifecycle one. The two are
+separate claims: evidence-gating is about not over-trusting a claim just
+because it's repeated; the benchmark is about whether similarity search
+finds the right memory at all. Worth keeping distinct when reading the
+number.
+
 The corroboration match itself uses a similarity **band**, not a single
 threshold: above `CORROBORATION_THRESHOLD` (0.85) is treated as the same
 finding restated; between 0.5 and 0.85 is genuinely ambiguous — related, but

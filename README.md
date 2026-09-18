@@ -76,7 +76,43 @@ no matter how many times it's restated (see [`DESIGN.md`](DESIGN.md)). If
 your failure mode is "the agent confidently remembered something false
 because it said so three times," that's the specific gap this fills; if
 you need Zep-grade temporal reasoning over a large conversation graph, use
-Zep.
+Zep — see the benchmark below, where that gap shows up concretely.
+
+---
+
+## Does the memory actually work? A real number, not a claim
+
+A real run against [LongMemEval](https://arxiv.org/abs/2410.10813) (oracle
+split), not a synthetic self-test: 12 questions stratified across all 6
+official question types, fresh isolated vault per question, real ChromaDB
+semantic search, graded by this repo's own `evals.runner.run_eval_judge`.
+Script, methodology, and full per-question results are committed in
+[`bench/`](bench/) — reproducible, not just asserted.
+
+**9/12 correct (75%).**
+
+| Question type | Result |
+|---|---|
+| knowledge-update | 2/2 |
+| single-session-assistant | 2/2 |
+| single-session-preference | 2/2 |
+| single-session-user | 2/2 |
+| multi-session | 1/2 |
+| temporal-reasoning | 0/2 |
+
+The honest part: **temporal-reasoning is a real, legitimate weak spot, not
+noise.** Both misses were about ordering two events in time — similarity
+search isn't inherently good at that without a reasoning layer on top. If
+temporal ordering over a large conversation graph is your main need, that's
+exactly the Zep comparison above, not a case for this vault yet.
+
+Caveats, stated plainly: 12 questions is a scoped sample (the oracle split
+has 500), chosen for time budget, not the full benchmark — read this as
+directional. The judge model was `llama3.2:1b`, swapped down from the
+originally planned `llama3.1:8b` for CPU-inference speed, and is a weaker
+grader than ideal — a re-run with a stronger judge would tighten the number.
+Neither caveat is hidden in `bench/longmemeval_bench.py`'s docstring or the
+raw results file; both are repeated here on purpose.
 
 ---
 

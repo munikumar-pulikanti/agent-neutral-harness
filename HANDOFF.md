@@ -195,10 +195,20 @@ Full findings and rationale in [`DESIGN.md`](DESIGN.md) and
 - **README**: added a "Why not just use X?" section (LiteLLM, Mem0/Zep/
   Letta) so a skeptical reader isn't left to guess the differentiation, and
   a "More reading" section linking the new docs.
-- **Still open, not done this pass:** a real LongMemEval-style benchmark
-  against `MemoryVault` (in progress, separate task) -- the differentiator
-  claim (evidence-gated confidence) is stated in README/DESIGN.md without
-  a fabricated number; a real result gets added once run, not invented.
+- **LongMemEval benchmark: done.** Real run, `bench/longmemeval_bench.py`
+  (tracked, portable -- fetches the dataset via `huggingface_hub`, not a
+  hardcoded local cache path), full per-question output in
+  `bench/longmemeval_bench_results.json`. **9/12 (75%)**, 12 questions
+  stratified across all 6 LongMemEval question types (2/type, seed=42,
+  oracle split). Judge was `llama3.2:1b` (swapped down from the planned
+  `llama3.1:8b` for CPU speed -- a real methodology caveat, stated in
+  README/DESIGN.md/the script's own docstring, not hidden). Genuine,
+  category-consistent miss on temporal-reasoning (0/2) -- stated as an
+  honest limitation, not smoothed over. Two false starts before this
+  number (a too-short judge timeout gave a bogus 0%, then chromadb got
+  transiently uninstalled by an unrelated parallel `uv sync`) were caught
+  and rejected before landing on the real result -- worth knowing this
+  wasn't the first number produced, in case it comes up.
 - **Before going public:** this pass needs its own tag (`v0.2.0`) same as
   the prior note about `v0.1.0`'s artifacts predating later commits --
   re-cut before `gh repo edit --visibility public`.
