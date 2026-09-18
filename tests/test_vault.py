@@ -43,6 +43,70 @@ def test_url_is_safe_rejects_private_and_bad_schemes():
     assert not _url_is_safe("not-a-url")
 
 
+# --------------------------------------------------------------------------- #
+# _verify_evidence_url -- SSRF guard must survive a redirect, not just the
+# initial URL. These stub ``_url_is_safe`` so the fast suite stays network-free.
+# --------------------------------------------------------------------------- #
+class _FakeResp:
+    def __init__(self, status_code, headers=None):
+        self.status_code = status_code
+        self.headers = headers or {}
+
+    def close(self):
+        pass
+
+
+def test_verify_evidence_url_accepts_clean_200(vault, monkeypatch):
+    monkeypatch.setattr("agent_neutral_harness.memory.vault._url_is_safe", lambda url: True)
+    monkeypatch.setattr(
+        "agent_neutral_harness.memory.vault.requests.head",
+        lambda url, timeout=5, allow_redirects=False: _FakeResp(200),
+    )
+    assert vault._verify_evidence_url("https://example.com/evidence") is True
+
+
+def test_verify_evidence_url_rejects_redirect_to_unsafe_host(vault, monkeypatch):
+    # Only the original URL passes the safety check -- the redirect target
+    # (standing in for something like a cloud metadata endpoint) does not.
+    monkeypatch.setattr(
+        "agent_neutral_harness.memory.vault._url_is_safe",
+        lambda url: url == "https://example.com/evidence",
+    )
+
+    def fake_head(url, timeout=5, allow_redirects=False):
+        assert url == "https://example.com/evidence", "must never request the unsafe redirect target"
+        return _FakeResp(302, {"Location": "http://169.254.169.254/latest/meta-data/"})
+
+    monkeypatch.setattr("agent_neutral_harness.memory.vault.requests.head", fake_head)
+    assert vault._verify_evidence_url("https://example.com/evidence") is False
+
+
+def test_verify_evidence_url_follows_redirect_to_validated_safe_host(vault, monkeypatch):
+    monkeypatch.setattr("agent_neutral_harness.memory.vault._url_is_safe", lambda url: True)
+    calls = []
+
+    def fake_head(url, timeout=5, allow_redirects=False):
+        calls.append(url)
+        if url == "https://example.com/evidence":
+            return _FakeResp(301, {"Location": "https://example.org/evidence"})
+        return _FakeResp(200)
+
+    monkeypatch.setattr("agent_neutral_harness.memory.vault.requests.head", fake_head)
+    assert vault._verify_evidence_url("https://example.com/evidence") is True
+    assert calls == ["https://example.com/evidence", "https://example.org/evidence"]
+
+
+def test_verify_evidence_url_gives_up_after_max_redirects(vault, monkeypatch):
+    monkeypatch.setattr("agent_neutral_harness.memory.vault._url_is_safe", lambda url: True)
+
+    def fake_head(url, timeout=5, allow_redirects=False):
+        # Always redirects to itself-ish -- an infinite chain.
+        return _FakeResp(302, {"Location": "https://example.com/next"})
+
+    monkeypatch.setattr("agent_neutral_harness.memory.vault.requests.head", fake_head)
+    assert vault._verify_evidence_url("https://example.com/evidence") is False
+
+
 def test_search_semantic_falls_back_to_keyword_without_chroma(vault):
     vault.save_memory("global", "fact", "vector store is optional")
     out = vault.search_semantic("vector store")

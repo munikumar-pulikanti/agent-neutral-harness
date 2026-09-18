@@ -32,7 +32,7 @@ import os
 import socket
 import sqlite3
 from contextlib import contextmanager
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import requests
 
@@ -61,6 +61,8 @@ CORROBORATION_THRESHOLD = 0.85  # "this is the same finding restated"
 REVIEW_BAND_LOW = 0.5           # below this: unrelated, insert fresh
 REVIEW_BAND_HIGH = 0.85         # [LOW, HIGH): related but same-or-conflicting is unclear
 CONFIRM_MIN_CORROBORATIONS = 3  # corroboration_count needed for "confirmed" (with evidence)
+
+MAX_EVIDENCE_REDIRECTS = 5  # hops walked manually before giving up as unverified
 
 # Search-cascade acceptance thresholds per tier.
 HOT_ACCEPT_THRESHOLD = 0.4      # your own curated data, lowest bar
@@ -277,13 +279,45 @@ class MemoryVault:
     # evidence
     # ------------------------------------------------------------------ #
     def _verify_evidence_url(self, url: str) -> bool:
+        """HEAD-check that ``url`` is reachable, re-validating every redirect hop.
+
+        ``requests(..., allow_redirects=True)`` follows a redirect chain
+        with no safety check on the *target* -- a URL that passes
+        ``_url_is_safe`` can 302 to a private/internal host (e.g. a cloud
+        metadata endpoint) and be followed anyway, defeating the SSRF
+        guard entirely. Redirects are therefore walked manually, one hop
+        at a time, and each target is re-checked with ``_url_is_safe``
+        before it is ever requested.
+
+        Known residual gap: ``_url_is_safe`` and the actual request each
+        do their own DNS resolution, moments apart -- a DNS-rebinding
+        attacker controlling the resolved name could in principle answer
+        differently between the two lookups. Not closed here (would need
+        pinning the checked IP and connecting to it directly); acceptable
+        for this project's threat model (evidence URLs come from your own
+        local/MCP clients, not the open internet), and noted in
+        SECURITY.md as a documented limitation rather than silently
+        ignored.
+        """
         if not url or not _url_is_safe(url):
             return False
-        try:
-            resp = requests.head(url, timeout=5, allow_redirects=True)
+        current = url
+        for _ in range(MAX_EVIDENCE_REDIRECTS):
+            try:
+                resp = requests.head(current, timeout=5, allow_redirects=False)
+                if resp.status_code in (405, 501):  # HEAD unsupported; fall back to GET
+                    resp = requests.get(current, timeout=5, allow_redirects=False, stream=True)
+                    resp.close()
+            except requests.RequestException:
+                return False
+            if 300 <= resp.status_code < 400 and resp.headers.get("Location"):
+                next_url = urljoin(current, resp.headers["Location"])
+                if not _url_is_safe(next_url):
+                    return False
+                current = next_url
+                continue
             return resp.status_code < 400
-        except requests.RequestException:
-            return False
+        return False  # too many redirects -- treat as unverified, not an error
 
     # ------------------------------------------------------------------ #
     # search
